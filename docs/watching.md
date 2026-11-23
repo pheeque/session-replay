@@ -129,6 +129,8 @@ With one policy for the whole app, that is the app's policy; with a policy per r
 
 Markers sit on the timeline in their colour and in a list next to the player; a click jumps to one second before the moment.
 
+The player remembers, per browser, the speed, the skip-inactivity switch and the marker kinds hidden in the list (`localStorage` `sr:player`), so the next replay opens the way the last one was left. The first one opens at 1x, skipping inactivity, with vitals hidden.
+
 | Marker | Colour |
 | --- | --- |
 | `error` | red |
@@ -136,7 +138,7 @@ Markers sit on the timeline in their colour and in a list next to the player; a 
 | `console` | amber |
 | `rage-click` | purple |
 | `navigation` | blue |
-| `vital` | green (hidden in the list until its chip is pressed) |
+| `vital` | green (hidden in the list until its chip is pressed, unless shown last time) |
 | `custom` | slate |
 | `report` | rose |
 

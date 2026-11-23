@@ -4,6 +4,7 @@ import 'rrweb-player/dist/style.css';
 import './player.css';
 import { momentUrl, startOffset } from './lib/moment.js';
 import { hasClass, livePoints, trailSegments } from './lib/pointer.js';
+import { readPreferences, savePreferences, SPEEDS } from './lib/preferences.js';
 import { referencedAssets, restoreAssets, restoreSnapshots, sharedSnapshots, sortEvents } from './lib/process.js';
 
 /**
@@ -168,11 +169,20 @@ function gapBands(player, stage, manifest, startedAt, text) {
     }
 }
 
+// localStorage itself throws where the browser blocks it, before getItem() could.
+function preferenceStorage() {
+    try {
+        return window.localStorage;
+    } catch {
+        return null;
+    }
+}
+
 function markerList(manifest, startedAt, seek, text) {
     const panel = element('aside', 'sr-markers');
     const filters = element('div', 'sr-markers__filters');
     const list = element('ol', 'sr-markers__list');
-    const hidden = new Set(['vital']);
+    const hidden = new Set(readPreferences(preferenceStorage()).hidden);
     const types = [...new Set(manifest.markers.map((marker) => marker.type))];
     const details = markerDetails(text);
     let selected = null;
@@ -224,6 +234,7 @@ function markerList(manifest, startedAt, seek, text) {
         chip.setAttribute('aria-pressed', String(!hidden.has(type)));
         chip.addEventListener('click', () => {
             hidden.has(type) ? hidden.delete(type) : hidden.add(type);
+            savePreferences(preferenceStorage(), { hidden: [...hidden] });
             chip.setAttribute('aria-pressed', String(!hidden.has(type)));
             render();
         });
@@ -234,6 +245,29 @@ function markerList(manifest, startedAt, seek, text) {
     panel.append(filters, list, details.panel);
 
     return panel;
+}
+
+/**
+ * The controller's speed buttons and skip-inactivity switch both end in the replayer's setConfig(); what they set is
+ * kept for the next replay. The speed goes back through the player, not as a prop, so the controller's button for it
+ * is the one shown as chosen.
+ */
+function rememberChoices(player, preferences) {
+    const replayer = player.getReplayer?.();
+
+    if (!replayer?.setConfig) return;
+
+    const setConfig = replayer.setConfig.bind(replayer);
+
+    replayer.setConfig = (config) => {
+        setConfig(config);
+        savePreferences(preferenceStorage(), {
+            ...('speed' in config ? { speed: config.speed } : {}),
+            ...('skipInactive' in config ? { skipInactive: config.skipInactive } : {}),
+        });
+    };
+
+    if (preferences.speed !== 1) player.setSpeed?.(preferences.speed);
 }
 
 // The players on the page, each with what stops it: one left listening keeps its recording in memory after
@@ -554,18 +588,21 @@ async function mount(root, options = {}) {
 
     root.replaceChildren(stage);
 
+    const preferences = readPreferences(preferenceStorage());
     const player = new Player({
         target: stage,
         props: {
             events,
             ...size(),
             autoPlay: false,
-            skipInactive: true,
+            skipInactive: preferences.skipInactive,
             showController: true,
-            speedOption: [1, 2, 4, 8],
+            speedOption: SPEEDS,
             tags: Object.fromEntries(Object.entries(COLORS).map(([type, color]) => [`sr:${type}`, color])),
         },
     });
+
+    rememberChoices(player, preferences);
 
     state.stops.push(() => {
         player.pause?.();
