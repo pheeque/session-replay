@@ -5,6 +5,7 @@ All notable changes to `packstub/session-replay` are documented here.
 ## Unreleased
 
 - **The player remembers how you watch:** speed, skip inactivity and the marker kinds you hid carry over to the next replay in the same browser
+- **Replays start sooner:** the player shows a recording as soon as its first page is in and loads the rest while you watch, twelve chunks at a time instead of four
 
 ## 1.2.0 — 2026-11-20
 

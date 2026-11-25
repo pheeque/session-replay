@@ -3,6 +3,7 @@ import { withDefaults } from './lib/labels.js';
 import 'rrweb-player/dist/style.css';
 import './player.css';
 import { momentUrl, startOffset } from './lib/moment.js';
+import { CHUNKS_AT_ONCE, inOrder, playable } from './lib/chunks.js';
 import { hasClass, livePoints, trailSegments } from './lib/pointer.js';
 import { readPreferences, savePreferences, SPEEDS } from './lib/preferences.js';
 import { referencedAssets, restoreAssets, restoreSnapshots, sharedSnapshots, sortEvents } from './lib/process.js';
@@ -10,7 +11,8 @@ import { referencedAssets, restoreAssets, restoreSnapshots, sharedSnapshots, sor
 /**
  * The player: loads a recording's manifest, its chunks, the shared snapshots
  * and stylesheets they reference, and mounts rrweb-player with the markers
- * next to it. Mounts itself on every [data-session-replay-player] element; the element's
+ * next to it as soon as the first full page snapshot is in; the later chunks
+ * are added to the playing replay as they arrive. Mounts itself on every [data-session-replay-player] element; the element's
  * data-manifest is the manifest URL.
  *
  * Runs once per tab (the script tag has data-navigate-once): with Livewire's
@@ -66,20 +68,40 @@ async function json(url) {
     return response.json();
 }
 
-async function inBatches(items, size, task) {
-    const results = new Array(items.length);
+/** Fetches each hash once per player, however many chunks point at it; null when it could not be loaded. */
+function fetcher(template) {
+    const texts = new Map();
 
-    for (let index = 0; index < items.length; index += size) {
-        await Promise.all(items.slice(index, index + size).map(async (item, offset) => (results[index + offset] = await task(item))));
-    }
+    return (hash) => {
+        if (!texts.has(hash)) {
+            const url = template.replace('__hash__', hash);
 
-    return results;
+            texts.set(hash, fetch(url, { credentials: 'same-origin' }).then((response) => (response.ok ? response.text() : null)).catch(() => null));
+        }
+
+        return texts.get(hash);
+    };
 }
 
-async function load(manifest, progress) {
-    let done = 0;
+async function textsFor(hashes, fetchText) {
+    const texts = new Map();
 
-    const chunks = await inBatches(manifest.chunks, 4, async (chunk) => {
+    await Promise.all(hashes.map(async (hash) => {
+        const text = await fetchText(hash);
+
+        // Without its tree a page replays empty, without its stylesheet unstyled, rather than not at all.
+        if (text !== null) texts.set(hash, text);
+    }));
+
+    return texts;
+}
+
+/** The recording's events one chunk at a time, in order, with their shared snapshots and stylesheets put back. */
+function chunks(manifest) {
+    const snapshot = manifest.snapshotUrl ? fetcher(manifest.snapshotUrl) : null;
+    const asset = fetcher(manifest.assetUrl);
+
+    return inOrder(manifest.chunks, CHUNKS_AT_ONCE, async (chunk) => {
         let events = [];
 
         try {
@@ -88,40 +110,23 @@ async function load(manifest, progress) {
             // A chunk that is missing or unreadable leaves a gap; the rest still plays.
         }
 
-        progress(++done, manifest.chunks.length);
+        events = sortEvents((Array.isArray(events) ? events : []).filter((event) => event && typeof event.timestamp === 'number'));
 
-        return Array.isArray(events) ? events : [];
+        // Shared snapshots first: the stylesheets they reference are only known once their trees are back.
+        if (snapshot) restoreSnapshots(events, await textsFor(sharedSnapshots(events), snapshot));
+
+        return restoreAssets(events, await textsFor(referencedAssets(events), asset));
     });
+}
 
-    const events = sortEvents(chunks.flat().filter((event) => event && typeof event.timestamp === 'number'));
-    const snapshots = new Map();
+/** A chunk into a built player: the replayer takes each event, the controller redraws its timeline once. */
+function addEvents(player, events) {
+    if (!events.length) return;
 
-    // Shared snapshots first: the stylesheets they reference are only known once their trees are back.
-    await inBatches(manifest.snapshotUrl ? sharedSnapshots(events) : [], 4, async (hash) => {
-        try {
-            const response = await fetch(manifest.snapshotUrl.replace('__hash__', hash), { credentials: 'same-origin' });
+    const replayer = player.getReplayer();
 
-            if (response.ok) snapshots.set(hash, await response.text());
-        } catch {
-            // Without its tree the page replays empty rather than not at all.
-        }
-    });
-
-    restoreSnapshots(events, snapshots);
-
-    const texts = new Map();
-
-    await inBatches(referencedAssets(events), 4, async (hash) => {
-        try {
-            const response = await fetch(manifest.assetUrl.replace('__hash__', hash), { credentials: 'same-origin' });
-
-            if (response.ok) texts.set(hash, await response.text());
-        } catch {
-            // Without its stylesheet a page replays unstyled rather than not at all.
-        }
-    });
-
-    return restoreAssets(events, texts);
+    events.slice(0, -1).forEach((event) => replayer.addEvent(event));
+    player.addEvent(events.at(-1));
 }
 
 /** A marker's payload, whatever shape the manifest gave it. */
@@ -558,24 +563,40 @@ async function mount(root, options = {}) {
     root.replaceChildren(status);
 
     let manifest;
-    let events;
 
     try {
         manifest = await json(manifestUrl);
-        events = state.stopped ? [] : await load(manifest, (done, total) => (status.textContent = `${text.loading} ${done}/${total}`));
     } catch (error) {
         status.textContent = error.status === 403 ? text.forbidden : text.failed;
 
         return null;
     }
 
+    const loader = chunks(manifest);
+    let events = [];
+    let loaded = 0;
+    const progress = (node) => (node.textContent = `${text.loading} ${loaded}/${manifest.chunks.length}`);
+
+    // Only as far as the first full page snapshot: the player plays from there while the rest comes in.
+    while (!state.stopped && !playable(events)) {
+        const { value, done } = await loader.next();
+
+        if (done) break;
+
+        events = events.concat(value);
+        loaded++;
+        progress(status);
+    }
+
     if (state.stopped) return null;
 
-    if (events.length < 2 || !events.some((event) => event.type === 2)) {
+    if (!playable(events)) {
         status.textContent = manifest.live ? text.just_started : text.no_snapshot;
 
         return null;
     }
+
+    sortEvents(events);
 
     const stage = element('div', 'sr-player__stage');
     const startedAt = events[0].timestamp;
@@ -621,8 +642,6 @@ async function mount(root, options = {}) {
 
     if (stopCover) state.stops.push(stopCover);
 
-    gapBands(player, stage, manifest, startedAt, text);
-
     const stopPointer = pointer(player, root);
 
     if (stopPointer) state.stops.push(stopPointer);
@@ -654,11 +673,49 @@ async function mount(root, options = {}) {
     const offset = startOffset(location.search, startedAt);
     const autoPlay = options.autoPlay ?? options.autoplay ?? root.dataset.autoplay === 'true';
 
-    if (offset > 0 || autoPlay) player.goto(offset, autoPlay);
+    let opening = offset > 0 || autoPlay;
+
+    // A moment further in waits for the chunk that reaches it.
+    const openWhenLoaded = (end) => {
+        if (!opening || end - startedAt < offset) return;
+
+        opening = false;
+        player.goto(offset, autoPlay);
+    };
+
+    openWhenLoaded(events.at(-1).timestamp);
 
     root.dispatchEvent(new CustomEvent('session-replay:ready', { detail: { player, manifest }, bubbles: true }));
 
+    loadRest();
+
     return player;
+
+    async function loadRest() {
+        const line = element('p', 'sr-player__loading');
+
+        if (loaded < manifest.chunks.length) {
+            progress(line);
+            stage.append(line);
+        }
+
+        for (;;) {
+            const { value, done } = await loader.next();
+
+            if (state.stopped) return;
+            if (done) break;
+
+            addEvents(player, value);
+            loaded++;
+            progress(line);
+
+            if (value.length) openWhenLoaded(value.at(-1).timestamp);
+        }
+
+        line.remove();
+        openWhenLoaded(Infinity);
+        gapBands(player, stage, manifest, startedAt, text);
+    }
 }
 
 /** Stops a player: paused, its listeners removed, its element emptied so it can be mounted again. */

@@ -32,6 +32,14 @@
     color: var(--sr-muted);
 }
 
+.sr-player__loading {
+    margin: 0;
+    padding: 0.5rem 0.625rem;
+    border-top: 1px solid var(--sr-border);
+    font-size: 0.75rem;
+    color: var(--sr-muted);
+}
+
 .sr-player__stage {
     min-width: 0;
     border: 1px solid var(--sr-border);
