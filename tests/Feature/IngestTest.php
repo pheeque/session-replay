@@ -984,3 +984,18 @@ it('stores a batch under the recording\'s write lock, taken before its first rea
 
     expect($lock)->toBeInt()->and($read)->toBeInt()->and($lock)->toBeLessThan($read);
 });
+
+it('narrows recordings to a length in seconds, from the start to the last activity', function () {
+    $start = now()->subHour()->startOfSecond();
+    $lengths = [];
+
+    foreach ([14, 15, 60, 61] as $seconds) {
+        $lengths[$this->recording(attributes: ['started_at' => $start, 'last_activity_at' => $start->copy()->addSeconds($seconds)])->id] = $seconds;
+    }
+
+    $lasting = fn (?int $min, ?int $max): array => ReplaySession::query()->lasting($min, $max)->pluck('id')->map(fn (string $id): int => $lengths[$id])->sort()->values()->all();
+
+    expect($lasting(15, null))->toBe([15, 60, 61])
+        ->and($lasting(null, 60))->toBe([14, 15, 60])
+        ->and($lasting(15, 60))->toBe([15, 60]);
+});

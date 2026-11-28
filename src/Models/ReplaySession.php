@@ -197,6 +197,25 @@ class ReplaySession extends ReplayModel
         return $this->last_activity_at === null ? null : (int) max(0, $this->last_activity_at->diffInSeconds(now()));
     }
 
+    /** Recordings whose length (durationMs(), from the start to the last activity) is within the bounds, in seconds. */
+    public function scopeLasting(Builder $query, ?int $minSeconds = null, ?int $maxSeconds = null): void
+    {
+        $grammar = $query->getQuery()->getGrammar();
+        $started = $grammar->wrap($query->qualifyColumn('started_at'));
+        $last = $grammar->wrap($query->qualifyColumn('last_activity_at'));
+
+        $seconds = match ($query->getConnection()->getDriverName()) {
+            'sqlite' => "round((julianday({$last}) - julianday({$started})) * 86400)",
+            'pgsql' => "extract(epoch from ({$last} - {$started}))",
+            'sqlsrv' => "datediff(second, {$started}, {$last})",
+            default => "timestampdiff(second, {$started}, {$last})",
+        };
+
+        $query
+            ->when($minSeconds !== null, fn (Builder $query) => $query->whereRaw("{$seconds} >= ?", [$minSeconds]))
+            ->when($maxSeconds !== null, fn (Builder $query) => $query->whereRaw("{$seconds} <= ?", [$maxSeconds]));
+    }
+
     public function scopeWithErrors(Builder $query): void
     {
         $query->where('error_count', '>', 0);
