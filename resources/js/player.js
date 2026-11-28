@@ -4,6 +4,7 @@ import 'rrweb-player/dist/style.css';
 import './player.css';
 import { momentUrl, startOffset } from './lib/moment.js';
 import { CHUNKS_AT_ONCE, inOrder, playable } from './lib/chunks.js';
+import { rebuildIframeDocuments } from './lib/documents.js';
 import { hasClass, livePoints, trailSegments } from './lib/pointer.js';
 import { readPreferences, savePreferences, SPEEDS } from './lib/preferences.js';
 import { referencedAssets, restoreAssets, restoreSnapshots, sharedSnapshots, sortEvents } from './lib/process.js';
@@ -274,6 +275,9 @@ function rememberChoices(player, preferences) {
 
     if (preferences.speed !== 1) player.setSpeed?.(preferences.speed);
 }
+
+// rrweb-player's controller under the frame, in pixels.
+const CONTROLLER_HEIGHT = 80;
 
 // The players on the page, each with what stops it: one left listening keeps its recording in memory after
 // wire:navigate swapped it out.
@@ -601,9 +605,16 @@ async function mount(root, options = {}) {
     const stage = element('div', 'sr-player__stage');
     const startedAt = events[0].timestamp;
     const size = () => {
+        const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+
+        // Fullscreen: the whole screen, less the controller. The page's own size would leave the frame where it was.
+        if (fullscreen && stage.contains(fullscreen)) {
+            return { width: fullscreen.clientWidth, height: Math.max(240, fullscreen.clientHeight - CONTROLLER_HEIGHT) };
+        }
+
         const width = Math.max(320, stage.clientWidth);
 
-        // 16:10 unless the window is too short; the controller takes 80px below the frame.
+        // 16:10 unless the window is too short; the controller takes its 80px below the frame.
         return { width, height: Math.max(240, Math.min(Math.round(width / 1.6), window.innerHeight - 220)) };
     };
 
@@ -624,6 +635,10 @@ async function mount(root, options = {}) {
     });
 
     rememberChoices(player, preferences);
+
+    const stopRebuild = rebuildIframeDocuments(player.getReplayer?.());
+
+    if (stopRebuild) state.stops.push(stopRebuild);
 
     state.stops.push(() => {
         player.pause?.();
@@ -664,9 +679,13 @@ async function mount(root, options = {}) {
     };
 
     window.addEventListener('resize', resize);
+    document.addEventListener('fullscreenchange', resize);
+    document.addEventListener('webkitfullscreenchange', resize);
     state.stops.push(() => {
         clearTimeout(resizing);
         window.removeEventListener('resize', resize);
+        document.removeEventListener('fullscreenchange', resize);
+        document.removeEventListener('webkitfullscreenchange', resize);
     });
 
     // ?t=83 opens the replay at 1:23; ?at=<epoch ms> (a log line's link) a moment before that time.
